@@ -1,19 +1,20 @@
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: keycloak
+  name: keycloak-external-config
 spec:
   tls:
     - hosts:
-        - KEYCLOAK_HOST
+        - my-keycloak.com
+        secretName: my-tls
   rules:
-    - host: KEYCLOAK_HOST
+    - host: my-keycloak.com
       http:
         paths:
           - path: /
             pathType: Prefix
             backend:
               service:
-                name: keycloak
+                name: keycloak-service
                 port:
-                  number: 8080
+                  number: 443
