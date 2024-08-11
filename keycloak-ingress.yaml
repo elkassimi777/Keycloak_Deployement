@@ -6,7 +6,7 @@ spec:
   tls:
     - hosts:
         - my-keycloak.com
-        secretName: my-tls
+      secretName: my-tls
   rules:
     - host: my-keycloak.com
       http:

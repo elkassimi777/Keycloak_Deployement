@@ -20,7 +20,7 @@ metadata:
   labels:
     app: keycloak
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: keycloak
@@ -32,7 +32,7 @@ spec:
       containers:
         - name: keycloak
           image: quay.io/keycloak/keycloak:25.0.2
-          args: ["start"]
+          args: ["start-dev"]
           env:
             - name: KEYCLOAK_ADMIN
               value: "admin"
@@ -41,15 +41,25 @@ spec:
             - name: KC_PROXY
               value: "edge"
             - name: KC_HOSTNAME
-              value: my-keycloak.com
-            - name: 'KC_HOSTNAME_STRICT_HTTPS'
-              value: true
+              value: "my-keycloak.com"
+            - name: KC_HOSTNAME_STRICT_HTTPS
+              value: "true"
             - name: KC_LOG_LEVEL
-              value: INFO
-             ports:
+              value: "INFO"
+            - name: KC_DB
+              value: postgres
+            - name: KC_DB_URL
+              value: jdbc:postgresql://postgres:5432/keycloak
+            - name: KC_DB_USERNAME
+              value: keycloak
+            - name: KC_DB_PASSWORD
+              value: password
+          ports:
             - name: http
               containerPort: 8080
           readinessProbe:
             httpGet:
               path: /realms/master
               port: 8080
+            initialDelaySeconds: 60
+            periodSeconds: 10
