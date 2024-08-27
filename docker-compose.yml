@@ -1,0 +1,558 @@
+# sert pour les tests 👉️ sigman + workr
+x-test-localstack: &x-test-localstack
+    image: localstack/localstack:3.0.2
+    environment:
+        - SERVICES=sqs,s3,dynamodb
+        - DEBUG=${DEBUG- }
+        - DATA_DIR=/tmp/localstack/data
+        - PORT_WEB_UI=${PORT_WEB_UI- }
+        - LAMBDA_EXECUTOR=${LAMBDA_EXECUTOR- }
+        - KINESIS_ERROR_PROBABILITY=${KINESIS_ERROR_PROBABILITY- }
+        - DOCKER_HOST=unix:///var/run/docker.sock
+        - HOST_TMP_FOLDER=${TMPDIR:-/tmp/localstack}
+    networks:
+        localstack_default:
+
+services:
+
+    #──────────────────── VRAC ────────────────────#
+
+    tunnels:
+        profiles: [ "dev" ]
+        image: php:8.1-apache-bullseye
+        volumes: [ ./data/tunnels/www:/var/www/html ]
+        ports: [ '19000:80' ]
+        networks:
+            webnet:
+
+    filebeat:
+        profiles: [ "builder" ]
+        image: docker.elastic.co/beats/filebeat:7.16.0
+        hostname: filebeat-${USER:-local}.peopulse.com
+        volumes:
+            - ./data/filebeat/config/filebeat.yml:/usr/share/filebeat/filebeat.yml
+            - ./data/filebeat/certs/:/usr/share/filebeat/certs:ro
+        extra_hosts:
+            - "elk.peopulse.com:51.91.247.15"
+        networks: [ webnet ]
+
+    mailcatcher: &mailcatcher
+        image: schickling/mailcatcher
+        profiles: [ "dev" ]
+        networks: [ webnet ]
+
+    redis: &redis
+        image: redis:7.2.4
+        profiles: [ "dev" ]
+        volumes: [ ./data/redis:/data ]
+        networks: [ webnet ]
+
+    memcached: &memcached
+        image: memcached
+        profiles: [ "dev" ]
+        networks: [ webnet ]
+
+    rabbitmq: &rabbitmq
+        image: rabbitmq:3.8.2-management
+        profiles: [ "dev" ]
+        networks: [ webnet ]
+        volumes:
+            - ./data/rabbitmq/config/enabled_plugins:/etc/rabbitmq/enabled_plugins
+
+    db: &db
+        image: mariadb:10.3
+        profiles: [ "dev" ]
+        networks: [ webnet ]
+        env_file: [ .env ]
+        volumes:
+            - ./data/mysql/startup-scripts:/docker-entrypoint-initdb.d
+            - ./data/mysql/utilities:/scripts/
+            - ./data/mysql/databases-folder:/var/lib/mysql:delegated
+            - ./data/mysql/config:/etc/mysql/conf.d
+
+    dbdw3:
+        image: postgres:11.3
+        profiles: [ "dev" ]
+        networks: [ webnet ]
+        env_file: [ .env ]
+        volumes:
+            - ./data/datawarehouse/pg/pgdata:/var/lib/postgresql/data:delegated
+            - ./data/datawarehouse/pg/pgconfig/postgres.conf:/etc/postgresql/postgresql.conf
+            - ./data/datawarehouse/pg/startup:/docker-entrypoint-initdb.d/
+        environment:
+            - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+            - POSTGRES_USER=${POSTGRES_USER}
+
+    dbdw3_client:
+        image: postgres:11.3
+        profiles: [ "dev" ]
+        networks: [ webnet ]
+        env_file: [ .env ]
+        volumes:
+            - ./data/datawarehouse_client/pg/pgdata:/var/lib/postgresql/data:delegated
+            - ./data/datawarehouse_client/pg/pgconfig/postgres.conf:/etc/postgresql/postgresql.conf
+        environment:
+            - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+            - POSTGRES_USER=${POSTGRES_USER}
+
+    #──────────────────── MAILER ────────────────────#
+
+    mailer_builder: &mailer
+        image: peopulse/app-mailer:7.4-builder
+        profiles: [ "builder" ]
+        environment: { APP_ENV: dev-docker }
+        env_file: [ .env ]
+        volumes:
+            - ./data/mailer/config/mailer.apache2.conf:/etc/apache2/sites-available/000-default.conf
+            - ./data/mailer/config/mailer.supervisord.conf:/etc/supervisor/conf.d/mailer.conf
+            - ./services/app-mailer:/app:delegated
+
+    mailer:
+        <<: *mailer
+        image: peopulse/app-mailer:7.4-apache-supervisor
+        profiles: [ "dev" ]
+        networks:
+            webnet:
+                aliases:
+                    - dev-docker-mailer.peopulse.com
+
+    #──────────────────── EU-INTERFACES ────────────────────#
+
+    eu_interfaces_builder: &eu-interfaces
+        image: peopulse/app-eu-interfaces:7.4-builder-debug
+        profiles: [ "builder" ]
+        volumes:
+            - ./services/app-eu-interfaces:/app:delegated
+            # only for tests
+            - ./data/sigman/tests:/tests
+            - ./data/sigman/report/eu-interfaces:/app/var/phpunit:delegated
+
+    #──────────────────── EU-INTERFACES TEST ────────────────────#
+    # Dans le bloc sigman (fort couplage à la db)
+
+    #──────────────────── SIGMAN ────────────────────#
+
+    sigman_builder: &sigman
+        image: peopulse/app-sigman:7.4-pc412-builder
+        profiles: [ "builder" ]
+        environment: { APP_ENV: dev-docker }
+        env_file: [ .env ]
+        volumes:
+            - ./services/app-sigman:/app:delegated
+            # only for calc
+            - ./data/sigman/config/sigman.apache2.conf:/etc/apache2/sites-available/000-default.conf
+            - ./data/sigman/config/sigman.supervisord.conf:/etc/supervisor/conf.d/sigman.conf
+            # only for tests
+            - ./data/sigman/tests:/tests
+            - ./data/sigman/report/manage:/app/manage/var/phpunit:delegated
+            - ./data/sigman/report/serv:/app/serv/var/phpunit:delegated
+            - ./data/sigman/report/sign:/app/sign/var/phpunit:delegated
+            # TODO vieux symlinks à virer un jour quand le refacto applicatif sera terminé ...
+            - ./data/shared/nfs/tmp:/app/manage/ns/public/tmp
+            - ./data/shared/nfs/tmp:/app/sign/ns/public/tmp
+            - ./data/shared/nfs/tmp:/app/manage/tmp
+            - ./data/shared/nfs/tmp:/app/sign/tmp
+            - ./data/shared/nfs/tmp:/app/manage/uploads/tmp
+            - ./data/shared/nfs/managr_uploads:/app/manage/uploads
+            - ./data/shared/nfs/managr_uploads:/app/sign/uploads_managr
+            - ./data/shared/nfs/signr_uploads:/app/manage/uploads_signr
+            - ./data/shared/nfs/signr_uploads:/app/sign/uploads
+            # swagger conf and ui
+            - ./data/sigman/swagger/:/app/manage/ns/public/swagger
+            - ./data/sigman/swagger/:/app/sign/ns/public/swagger
+
+    # 👇 Ce conteneur n'existe que parce que ce fichu phalcon nous les brise menu.
+    # @see https://github.com/peopulse/php-dockerfiles/blob/app-7.4/app-sigman/pc412-builder.dockerfile#L70-L78
+    sigman_psalm:
+        <<: *sigman
+        env_file: [] # simule le fonctionnement de la CI Github sans variables
+        image: peopulse/app-sigman:7.4-pc412-builder-psalm
+
+    sigman_calc:
+        <<: *sigman
+        image: peopulse/app-sigman:7.4-pc412-calc
+        profiles: [ "dev" ]
+
+    sigman_web:
+        <<: *sigman
+        image: peopulse/app-sigman:7.4-pc412-apache-debug
+        profiles: [ "dev" ]
+        networks:
+            webnet:
+                aliases:
+                    - dev-docker-agence.peopulse.com
+                    - dev-docker-ns-agence.peopulse.com
+                    - dev-docker-entreprise.peopulse.com
+                    - dev-docker-ns-entreprise.peopulse.com
+
+    #──────────────────── SIGMAN TEST ────────────────────#
+
+    sigman_test_builder:
+        <<: *sigman
+        profiles: [ "sigman_test" ]
+        env_file: [ .env, .env.sigman.test ]
+        environment: { APP_ENV: test }
+
+    sigman_test_web:
+        <<: *sigman
+        image: peopulse/app-sigman:7.4-pc412-apache-test
+        profiles: [ "sigman_test" ]
+        env_file: [ .env, .env.sigman.test ]
+        environment: { APP_ENV: test }
+        networks:
+            webnet:
+                aliases:
+                    - test-agence.peopulse.com
+                    - test-ns-agence.peopulse.com
+                    - test-entreprise.peopulse.com
+                    - test-ns-entreprise.peopulse.com
+
+
+    sigman_test_eu_interfaces_builder:
+        <<: *eu-interfaces
+        image: peopulse/app-eu-interfaces:7.4-builder
+        profiles: [ "sigman_test" ]
+        env_file: [ .env, .env.sigman.test ]
+        environment: { APP_ENV: test }
+
+    sigman_test_eu_interfaces_calc:
+        <<: *eu-interfaces
+        image: peopulse/app-eu-interfaces:7.4-calc-test
+        profiles: [ "sigman_test" ]
+        env_file: [ .env, .env.sigman.test ]
+        environment: { APP_ENV: test }
+
+    sigman_test_mailcatcher:
+        <<: *mailcatcher
+        profiles: [ "sigman_test" ]
+
+    sigman_test_redis:
+        <<: *redis
+        profiles: [ "sigman_test" ]
+        volumes: [ ]
+
+    sigman_test_memcached:
+        <<: *memcached
+        profiles: [ "sigman_test" ]
+
+    sigman_test_rabbitmq:
+        <<: *rabbitmq
+        profiles: [ "sigman_test" ]
+
+    sigman_test_db: &sigman_test_db
+        profiles: [ "sigman_test" ]
+        image: peopulse/mariadb:10.3-sigman-test
+        networks: [ webnet ]
+        env_file: [ .env, .env.sigman.test ]
+        volumes:
+            - ./data/mysql/utilities:/scripts/
+            - ./data/mysql/config:/etc/mysql/conf.d
+
+    sigman_test_dbdw3:
+        image: postgres:11.3
+        profiles: [ "sigman_test" ]
+        networks: [ webnet ]
+        env_file: [ .env, .env.sigman.test ]
+        volumes:
+            - ./data/datawarehouse/pg/pgconfig/postgres.conf:/etc/postgresql/postgresql.conf
+            - ./data/datawarehouse/pg/startup:/docker-entrypoint-initdb.d/
+        environment:
+            - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+            - POSTGRES_USER=${POSTGRES_USER}
+
+    sigman_test_dbdw3_client:
+        image: postgres:11.3
+        profiles: [ "sigman_test" ]
+        networks: [ webnet ]
+        env_file: [ .env, .env.sigman.test ]
+        volumes:
+            - ./data/datawarehouse_client/pg/pgconfig/postgres.conf:/etc/postgresql/postgresql.conf
+        environment:
+            - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+            - POSTGRES_USER=${POSTGRES_USER}
+
+    sigman_test_localstack:
+        <<: *x-test-localstack
+        profiles: [ "sigman_test" ]
+        env_file: [ .env, .env.sigman.test ]
+
+    sigman_test_opensearch:
+        build:
+            context: ./dockerfiles/opensearch
+            dockerfile: Dockerfile
+        container_name: sigman_test_opensearch
+        profiles: [ "sigman_test" ]
+        environment:
+            - cluster.name=opensearch-cluster # Name the cluster
+            - node.name=opensearch-node # Name the node that will run in this container
+            - discovery.seed_hosts=opensearch-node# Nodes to look for when discovering the cluster
+            - cluster.initial_cluster_manager_nodes=opensearch-node # Nodes eligibile to serve as cluster manager
+            - bootstrap.memory_lock=true # Disable JVM heap memory swapping
+            - node.store.allow_mmap=false
+            - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m" # Set min and max JVM heap sizes to at least 50% of system RAM
+            - "DISABLE_INSTALL_DEMO_CONFIG=true" # Prevents execution of bundled demo script which installs demo certificates and security configurations to OpenSearch
+            - "DISABLE_SECURITY_PLUGIN=true" # Disables Security plugin
+        ulimits:
+            memlock:
+                soft: -1 # Set memlock to unlimited (no soft or hard limit)
+                hard: -1
+            nofile:
+                soft: 65536 # Maximum number of open files for the opensearch user - set to at least 65536
+                hard: 65536
+        networks:
+            - webnet
+
+
+    #─────────────── INTERFACE DESIGNR ──────────────────#
+    interface_designr_web:
+        build:
+            context: dockerfiles/interface-designr/web
+        profiles: [ "dev", "sigman_test" ]
+        volumes:
+            - ./data/interface-designr/config/interface-designr.nginx.conf:/etc/nginx/sites-available/default
+            - ./data/interface-designr/config/interface-designr.supervisord.conf:/etc/supervisor/conf.d/supervisord.conf
+            - ./services/app-interface-designr:/app
+            - ./data/shared:/data/shared
+        networks:
+            webnet:
+                aliases:
+                    - dev-docker-api-interface-designr.peopulse.com
+
+    #──────────────────── WORKR ────────────────────────#
+
+    workr_builder: &workr
+        image: peopulse/workr:7.4-builder
+        profiles: [ "builder" ]
+        environment: { APP_ENV: dev-docker }
+        env_file: [ .env ]
+        volumes:
+            - ./services/workr/Workr:/app:delegated
+            # only for calc
+            - ./data/workr/config/workr.apache2.conf:/etc/apache2/sites-available/000-default.conf
+            - ./data/workr/config/workr.supervisord.conf:/etc/supervisor/conf.d/workr.conf
+            # only for tests
+            - ./data/workr/tests:/tests
+            - ./data/workr/report:/app/var/phpunit:delegated
+
+    workr_calc:
+        <<: *workr
+        image: peopulse/workr:7.4-calc
+        profiles: [ "dev" ]
+
+    workr_web:
+        <<: *workr
+        image: peopulse/workr:7.4-apache-debug
+        profiles: [ "dev" ]
+        networks:
+            webnet:
+                aliases:
+                    - dev-docker-api-interimaire.peopulse.com
+    workr_front:
+        image: nginx:latest
+        profiles: [ "dev" ]
+        volumes:
+            - ./services/app-angular/dist/apps/workr:/usr/share/nginx/html
+        ports:
+            - "8080:80"
+        extra_hosts:
+            - "dev-docker-interimaire.peopulse.com:127.0.0.1"
+
+    #──────────────────── WORKR TEST ────────────────────#
+
+    workr_test_builder:
+        <<: *workr
+        profiles: [ "workr_test" ]
+        env_file: [ .env, .env.workr.test ]
+        environment: { APP_ENV: test }
+
+    workr_test_web:
+        <<: *workr
+        image: peopulse/workr:7.4-apache-test
+        profiles: [ "workr_test" ]
+        env_file: [ .env, .env.workr.test ]
+        environment: { APP_ENV: test }
+        networks:
+            webnet:
+                aliases:
+                    - test-interimaire.peopulse.com
+
+    workr_test_mailcatcher:
+        <<: *mailcatcher
+        profiles: [ "workr_test" ]
+
+    workr_test_redis:
+        <<: *redis
+        profiles: [ "workr_test" ]
+        volumes: [ ]
+
+    workr_test_memcached:
+        <<: *memcached
+        profiles: [ "workr_test" ]
+
+    workr_test_rabbitmq:
+        <<: *rabbitmq
+        profiles: [ "workr_test" ]
+
+    workr_test_db:
+        profiles: [ "workr_test" ]
+        image: peopulse/mariadb:10.3-workr-test
+        networks: [ webnet ]
+        env_file: [ .env, .env.workr.test ]
+        volumes:
+            - ./data/mysql/utilities:/scripts/
+            - ./data/mysql/config:/etc/mysql/conf.d
+
+    workr_test_localstack:
+        <<: *x-test-localstack
+        profiles: [ "workr_test" ]
+        env_file: [ .env, .env.workr.test ]
+
+    #──────────────────── BUILDER ────────────────────────#
+
+    scheduler_builder:
+        image: peopulse/php:7.4-builder
+        profiles: [ "builder" ]
+        env_file: [ .env ]
+        volumes:
+            - ./services/php-scheduler:/app:delegated
+
+    toolbox_builder:
+        image: peopulse/php:7.4-builder
+        profiles: [ "builder" ]
+        env_file: [ .env ]
+        volumes:
+            - ./services/php-toolbox:/app:delegated
+
+    tools_builder:
+        image: peopulse/php:7.4-builder
+        profiles: [ "builder" ]
+        env_file: [ .env ]
+        volumes:
+            - ./services/tools:/app:delegated
+
+    shared_builder:
+        image: peopulse/php:7.4-builder
+        profiles: [ "builder" ]
+        env_file: [ .env ]
+        volumes:
+            - ./services/pp-sigman-shared:/app:delegated
+
+    #──────────────────── OPENSEARCH ────────────────────────#
+    opensearch-node1:
+        build:
+            context: ./dockerfiles/opensearch
+            dockerfile: Dockerfile
+        container_name: opensearch-node1
+        profiles: [ "dev" ]
+        environment:
+            - cluster.name=opensearch-cluster # Name the cluster
+            - node.name=opensearch-node1 # Name the node that will run in this container
+            - discovery.seed_hosts=opensearch-node1,opensearch-node2 # Nodes to look for when discovering the cluster
+            - cluster.initial_cluster_manager_nodes=opensearch-node1,opensearch-node2 # Nodes eligibile to serve as cluster manager
+            - bootstrap.memory_lock=true # Disable JVM heap memory swapping
+            - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m" # Set min and max JVM heap sizes to at least 50% of system RAM
+            - "DISABLE_INSTALL_DEMO_CONFIG=true" # Prevents execution of bundled demo script which installs demo certificates and security configurations to OpenSearch
+            - "DISABLE_SECURITY_PLUGIN=true" # Disables Security plugin
+        ulimits:
+            memlock:
+                soft: -1 # Set memlock to unlimited (no soft or hard limit)
+                hard: -1
+            nofile:
+                soft: 65536 # Maximum number of open files for the opensearch user - set to at least 65536
+                hard: 65536
+        volumes:
+            - opensearch-data1:/usr/share/opensearch/data # Creates volume called opensearch-data1 and mounts it to the container
+        ports:
+            - 9201:9200 # REST API sur port host 9201 au lieu de 9200 pour ne pas avoir de conflit avec catchim
+            - 9600:9600 # Performance Analyzer
+        networks:
+            - opensearch-net # All of the containers will join the same Docker bridge network
+            - webnet
+    opensearch-node2:
+        build:
+            context: ./dockerfiles/opensearch
+            dockerfile: Dockerfile
+        container_name: opensearch-node2
+        profiles: [ "dev" ]
+        environment:
+            - cluster.name=opensearch-cluster # Name the cluster
+            - node.name=opensearch-node2 # Name the node that will run in this container
+            - discovery.seed_hosts=opensearch-node1,opensearch-node2 # Nodes to look for when discovering the cluster
+            - cluster.initial_cluster_manager_nodes=opensearch-node1,opensearch-node2 # Nodes eligibile to serve as cluster manager
+            - bootstrap.memory_lock=true # Disable JVM heap memory swapping
+            - "OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m" # Set min and max JVM heap sizes to at least 50% of system RAM
+            - "DISABLE_INSTALL_DEMO_CONFIG=true" # Prevents execution of bundled demo script which installs demo certificates and security configurations to OpenSearch
+            - "DISABLE_SECURITY_PLUGIN=true" # Disables Security plugin
+        ulimits:
+            memlock:
+                soft: -1 # Set memlock to unlimited (no soft or hard limit)
+                hard: -1
+            nofile:
+                soft: 65536 # Maximum number of open files for the opensearch user - set to at least 65536
+                hard: 65536
+        volumes:
+            - opensearch-data2:/usr/share/opensearch/data # Creates volume called opensearch-data2 and mounts it to the container
+        networks:
+            - opensearch-net # All of the containers will join the same Docker bridge network
+            - webnet
+    opensearch-dashboards:
+        image: opensearchproject/opensearch-dashboards:latest
+        container_name: opensearch-dashboards
+        profiles: [ "dev" ]
+        ports:
+            - 5601:5601 # Map host port 5601 to container port 5601
+        expose:
+            - "5601" # Expose port 5601 for web access to OpenSearch Dashboards
+        environment:
+            - 'OPENSEARCH_HOSTS=["http://opensearch-node1:9200","http://opensearch-node2:9200"]'
+            - "DISABLE_SECURITY_DASHBOARDS_PLUGIN=true" # disables security dashboards plugin in OpenSearch Dashboards
+        networks:
+            - opensearch-net
+            - webnet
+
+    #──────────────────── KEYCLOACK ────────────────────────#
+    keycloack:
+        image: quay.io/keycloak/keycloak:24.0.2
+        container_name: keycloak-local
+        profiles: [ "dev" ]
+        ports: 
+            - 8081:8080 
+            - 8443:8443
+        networks: [ webnet ]
+        command: start-dev
+        environment:
+            
+            - 'KEYCLOAK_ADMIN=admin'
+            - 'KEYCLOAK_ADMIN_PASSWORD=admin'
+            - 'KC_HTTPS_CERTIFICATE_FILE=/etc/x509/https/tls.crt'
+            - 'KC_HTTPS_CERTIFICATE_KEY_FILE=/etc/x509/https/tls.key'
+        volumes:
+          
+         - ./apache-selfsigned.crt:/etc/x509/https/tls.crt
+         - ./apache-selfsigned.key:/etc/x509/https/tls.key   
+       
+volumes:
+    opensearch-data1:
+        driver: local
+        driver_opts:
+            type: 'none'
+            o: 'bind'
+            device: './data/opensearch/data1'
+    opensearch-data2:
+        driver: local
+        driver_opts:
+            type: 'none'
+            o: 'bind'
+            device: './data/opensearch/data2'
+
+
+    #──────────────────── networks ────────────────────#
+
+networks:
+    webnet:
+        driver: bridge
+    ppmi-kong-stack_webnet:
+        external: true
+    localstack_default:
+        external: true
+    opensearch-net:
